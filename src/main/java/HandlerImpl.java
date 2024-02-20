@@ -1,10 +1,12 @@
 import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class HandlerImpl implements Handler {
     private final Client client;
+    private final ExecutorService executorService = Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors() * 10);//TODO find optimal threads pool number
 
     public HandlerImpl(Client client) {
         this.client = client;
@@ -19,31 +21,35 @@ public class HandlerImpl implements Handler {
     public void performOperation() {
         //TODO add a mechanism to gracefully exit this loop as needed
         while (true) {
-            Event event = client.readData(); // Blocking call to read data
-            List<Address> recipients = event.recipients();
-            Payload payload = event.payload();
-
-            CompletableFuture<?>[] futures = recipients.stream()
-                    .map(address -> CompletableFuture.runAsync(() -> sendWithRetry(address, payload)))
-                    .toArray(CompletableFuture[]::new);
-
-            CompletableFuture.allOf(futures).join(); // Wait for all sending operations to complete
+            Event event = client.readData();
+            processEvent(event);
         }
     }
 
+    private void processEvent(Event event) {
+        List<Address> recipients = event.recipients();
+        Payload payload = event.payload();
+
+        // Initiate send operations without blocking to wait for them to complete.
+        recipients.forEach(address ->
+                CompletableFuture.runAsync(() -> sendWithRetry(address, payload), executorService)
+        );
+    }
+
     private void sendWithRetry(Address dest, Payload payload) {
-        boolean accepted = false;
-        do {
+        boolean sent = false;
+        while (!sent) {
             Result result = client.sendData(dest, payload);
-            accepted = result == Result.ACCEPTED;
-            if (!accepted) {
+            if (result == Result.ACCEPTED) {
+                sent = true;
+            } else if (result == Result.REJECTED) {
                 try {
-                    TimeUnit.MILLISECONDS.sleep(timeout().toMillis()); // Wait for the specified timeout before retrying
+                    Thread.sleep(timeout().toMillis()); // Delay before retry, consider using a non-blocking delay
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
-                    throw new RuntimeException("Thread interrupted during sleep", e);
+                    throw new RuntimeException("Interrupted during retry delay", e);
                 }
             }
-        } while (!accepted);
+        }
     }
 }
